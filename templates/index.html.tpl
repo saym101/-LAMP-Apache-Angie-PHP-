@@ -12,7 +12,7 @@ h1.c1 {text-align: center}
 
 <h1 class="c1">Веб-сервер работает</h1>
 <p class="c2">
-<a href="http://phpinfo.php" target="_top">проверить PHP, если был установлен</a>
+<a href="phpinfo.php" target="_top">проверить PHP, если был установлен</a>
 </p>
 
 </body>
