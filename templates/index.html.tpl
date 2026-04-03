@@ -21,6 +21,6 @@
         <p><strong>PHP:</strong> <span class="{{PHP_CLASS}}">{{PHP_NAME}}</span></p>
     </div>
     {{PHP_LINK}}
-    <p><small>Установлено: <a href="https://github.com/saym101/-LAMP-Apache-Angie-PHP-">lamp.sh v{{SCRIPT_VERSION}}</a></small></p>
+    <p><small>Установлено: <a href="https://github.com/saym101/-LAMP-Apache-Angie-PHP-" target="_blank">lamp.sh v{{SCRIPT_VERSION}}</a></small></p>
 </body>
 </html>
