@@ -76,10 +76,12 @@ detect_state() {
 setup_base() {
     log_msg g "=== Проверка зависимостей ==="
     apt-get update -qq >/dev/null 2>&1
-    for pkg in curl wget gnupg ca-certificates lsb-release whiptail; do
+    for pkg in curl mc wget gnupg ca-certificates lsb-release whiptail; do
         ensure_package "$pkg" || return 1
     done
     mkdir -p "$STATE_DIR" "$BACKUP_DIR"
+    # mc: подсветка синтаксиса для неизвестных файлов
+    [ -f /usr/share/mc/syntax/sh.syntax ] && cp /usr/share/mc/syntax/sh.syntax /usr/share/mc/syntax/unknown.syntax 2>/dev/null
 }
 
 # ============================================================
@@ -660,6 +662,9 @@ install_webserver() {
         setup_php                || return 1
         configure_angie_vhost    || return 1
         configure_socket "angie" || return 1
+        # Перезапуск после PHP — сокет появляется уже после старта Angie
+        log_msg c "Перезапуск Angie для подключения PHP-FPM..."
+        systemctl restart angie >/dev/null 2>&1
     else
         setup_apache               || return 1
         setup_php                  || return 1
@@ -695,6 +700,9 @@ switch_webserver() {
         setup_php                || return 1
         configure_angie_vhost    || return 1
         configure_socket "angie" || return 1
+        # Перезапуск после PHP — сокет появляется уже после старта Angie
+        log_msg c "Перезапуск Angie для подключения PHP-FPM..."
+        systemctl restart angie >/dev/null 2>&1
     else
         remove_angie
         setup_apache               || return 1
@@ -807,4 +815,3 @@ main() {
     menu
 }
 main "$@"
-
