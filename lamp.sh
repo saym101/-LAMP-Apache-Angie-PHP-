@@ -4,8 +4,9 @@
 # Лицензия: MIT
 
 readonly SCRIPT_VERSION="4.1.0"
-# Версия PHP не зашита жёстко: определяется по уже установленному пакету
-# (detect_state) или выбирается админом при первой установке (select_php_version).
+# Версия PHP не зашита жёстко: берётся из уже установленного пакета
+# (detect_state) либо, при первой установке, определяется как штатная
+# для этого релиза ОС (php_recommended_version).
 PHP_VER=""
 readonly SITE_ROOT="/var/www/html"
 readonly BACKUP_DIR="/backups/web-lamp"
@@ -88,45 +89,70 @@ php_recommended_version() {
     php_native_versions | tail -1
 }
 
-# Интерактивный выбор версии PHP для установки. По умолчанию отмечена та
-# версия, что уже есть в штатных репозиториях этой ОС/релиза — её и стоит
-# ставить в большинстве случаев. Любая другая версия потребует подключения
-# стороннего репозитория (Sury на Debian, ppa:ondrej/php на Ubuntu) — это
-# происходит только если админ осознанно выбрал версию, которой нет в штатных
-# репах, а не всегда "на всякий случай".
-select_php_version() {
-    local default_ver native_vers=() v status choice custom_ver args=()
-    default_ver=$(php_recommended_version)
-    mapfile -t native_vers < <(php_native_versions)
+# Подключает Sury (Debian) / ppa:ondrej/php (Ubuntu) заранее, даже если для
+# установки хватает штатной версии — чтобы позже поставить другую версию PHP
+# можно было одной командой `apt install phpX.Y-fpm`, без повторной возни с
+# ключами и репозиторием. Приоритет пакетов из этого репо намеренно ниже
+# приоритета по умолчанию (500), чтобы штатную версию не могло случайно
+# "перетянуть" на сборку из стороннего репо при обычном apt upgrade — она
+# используется только когда явно запрошена версия, которой нет в штатных.
+provision_php_repo() {
+    local pin_file="/etc/apt/preferences.d/98-php-thirdparty"
+    [ -f "$pin_file" ] && return 0
+    # shellcheck disable=SC1091
+    . /etc/os-release
+    case "$ID" in
+        debian)
+            mkdir -p /usr/share/keyrings
+            curl -sSLo /usr/share/keyrings/deb.sury.org-php.gpg \
+                https://packages.sury.org/php/apt.gpg 2>/dev/null \
+                || { log_msg y "Не удалось загрузить ключ Sury — сторонний репозиторий PHP пропущен"; return 1; }
+            echo "deb [signed-by=/usr/share/keyrings/deb.sury.org-php.gpg] https://packages.sury.org/php/ ${VERSION_CODENAME} main" \
+                > /etc/apt/sources.list.d/php.list
+            printf 'Package: *\nPin: origin packages.sury.org\nPin-Priority: 100\n' > "$pin_file"
+            ;;
+        ubuntu)
+            ensure_package software-properties-common || return 1
+            add-apt-repository -y ppa:ondrej/php >/dev/null 2>&1 \
+                || { log_msg y "Не удалось подключить ppa:ondrej/php — сторонний репозиторий PHP пропущен"; return 1; }
+            printf 'Package: *\nPin: release o=LP-PPA-ondrej-php\nPin-Priority: 100\n' > "$pin_file"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+    apt-get update -qq >/dev/null 2>&1
+    log_msg c "Сторонний репозиторий PHP подключён (низкий приоритет) — для другой версии: apt install phpX.Y-fpm"
+}
+
+# Модули PHP, отмеченные по умолчанию — тот же набор, что раньше был зашит
+# жёстко (под WordPress/DLE + imagick). php-fpm и php-common ставятся всегда
+# и в список не входят. Остальное — по вкусу админа, отмечено выключенным.
+select_php_modules() {
+    local defaults="mysql xml curl gd mbstring zip intl bcmath imagick"
+    local extra="soap ldap sqlite3 redis memcached apcu gmp"
+    local mod args=() choice result
 
     if command -v whiptail &>/dev/null; then
-        for v in "${native_vers[@]}"; do
-            status="OFF"
-            [ "$v" = "$default_ver" ] && status="ON"
-            args+=("$v" "в штатных репозиториях этой ОС" "$status")
+        for mod in $defaults; do
+            args+=("$mod" "$mod" "ON")
         done
-        args+=("custom" "другая версия (потребуется стороннее apt-репо)" "OFF")
-        choice=$(whiptail --title "Выбор версии PHP" --radiolist \
-            $'Версия по умолчанию отмечена — под неё настроен текущий релиз ОС.\nВыберите версию (пробел — отметить, Enter — подтвердить):' \
-            18 74 8 "${args[@]}" 3>&1 1>&2 2>&3)
-        [ -z "$choice" ] && { log_msg y "Выбор версии PHP отменён"; return 1; }
+        for mod in $extra; do
+            args+=("$mod" "$mod" "OFF")
+        done
+        choice=$(whiptail --title "Модули PHP" --checklist \
+            $'php-fpm и php-common ставятся всегда.\nОтметьте нужные модули (пробел — переключить, Enter — подтвердить):' \
+            20 70 12 "${args[@]}" 3>&1 1>&2 2>&3)
+        if [ -z "$choice" ]; then
+            echo "$defaults"
+            return
+        fi
+        # whiptail возвращает список тегов в кавычках через пробел: "mysql" "gd" ...
+        eval "result=($choice)"
+        echo "${result[*]}"
     else
-        log_msg c "Версии PHP в штатных репозиториях: ${native_vers[*]:-нет}"
-        read -r -e -i "$default_ver" -p "Версия PHP для установки (Enter — по умолчанию): " choice
-        [ -z "$choice" ] && choice="$default_ver"
+        echo "$defaults"
     fi
-
-    if [ "$choice" = "custom" ]; then
-        read -r -p "Введите версию PHP (например 8.4 или 7.4): " custom_ver
-        [ -z "$custom_ver" ] && { log_msg r "Версия не введена"; return 1; }
-        choice="$custom_ver"
-    fi
-
-    if ! [[ "$choice" =~ ^[0-9]+\.[0-9]+$ ]]; then
-        log_msg r "Некорректный формат версии: $choice"
-        return 1
-    fi
-    PHP_VER="$choice"
 }
 
 get_public_ip() {
@@ -183,52 +209,28 @@ setup_php() {
     log_msg g "=== Установка PHP ${PHP_VER} ==="
 
     if apt_pkg_available "php${PHP_VER}-fpm"; then
-        log_msg c "PHP ${PHP_VER} уже есть в штатных репозиториях — сторонний репозиторий не нужен"
+        # Штатная версия уже доступна — но всё равно подключаем сторонний
+        # репозиторий (с низким приоритетом), чтобы другую версию PHP можно
+        # было поставить позже без повторной возни с ключами/репо.
+        provision_php_repo
     else
-        # shellcheck disable=SC1091
-        . /etc/os-release
-        case "$ID" in
-            debian)
-                mkdir -p /usr/share/keyrings
-                curl -sSLo /usr/share/keyrings/deb.sury.org-php.gpg \
-                    https://packages.sury.org/php/apt.gpg 2>/dev/null \
-                    || { log_msg r "Ошибка загрузки ключа Sury"; return 1; }
-                echo "deb [signed-by=/usr/share/keyrings/deb.sury.org-php.gpg] https://packages.sury.org/php/ ${VERSION_CODENAME} main" \
-                    > /etc/apt/sources.list.d/php.list
-                apt-get update -qq >/dev/null 2>&1
-                if ! apt_pkg_available "php${PHP_VER}-fpm"; then
-                    log_msg r "PHP ${PHP_VER} недоступен в packages.sury.org для Debian ${VERSION_CODENAME}"
-                    rm -f /etc/apt/sources.list.d/php.list
-                    return 1
-                fi
-                ;;
-            ubuntu)
-                ensure_package software-properties-common || return 1
-                if ! add-apt-repository -y ppa:ondrej/php >/dev/null 2>&1; then
-                    log_msg r "Не удалось подключить ppa:ondrej/php для Ubuntu ${VERSION_CODENAME}"
-                    return 1
-                fi
-                apt-get update -qq >/dev/null 2>&1
-                if ! apt_pkg_available "php${PHP_VER}-fpm"; then
-                    log_msg r "PHP ${PHP_VER} недоступен в ppa:ondrej/php для Ubuntu ${VERSION_CODENAME}"
-                    return 1
-                fi
-                ;;
-            *)
-                log_msg r "Неизвестная ОС ($ID) — автоподбор репозитория PHP не поддерживается"
-                return 1
-                ;;
-        esac
+        log_msg y "PHP ${PHP_VER} не найден в штатных репозиториях — пробую сторонний"
+        provision_php_repo || return 1
+        if ! apt_pkg_available "php${PHP_VER}-fpm"; then
+            log_msg r "PHP ${PHP_VER} недоступен ни в штатных репозиториях, ни в стороннем"
+            return 1
+        fi
     fi
 
-    # Модули под WordPress / DLE + imagick
-    local modules="php${PHP_VER}-fpm php${PHP_VER}-common php${PHP_VER}-mysql php${PHP_VER}-xml \
-php${PHP_VER}-curl php${PHP_VER}-gd php${PHP_VER}-mbstring php${PHP_VER}-zip \
-php${PHP_VER}-intl php${PHP_VER}-bcmath php${PHP_VER}-imagick"
+    local modules; modules=$(select_php_modules)
+    local pkglist="php${PHP_VER}-fpm php${PHP_VER}-common" mod
+    for mod in $modules; do
+        pkglist+=" php${PHP_VER}-${mod}"
+    done
 
-    log_msg c "Устанавливаю модули PHP..."
+    log_msg c "Устанавливаю PHP и модули: ${modules}..."
     # shellcheck disable=SC2086
-    apt-get install -y $modules >/dev/null 2>&1 || { log_msg r "Ошибка установки PHP"; return 1; }
+    apt-get install -y $pkglist >/dev/null 2>&1 || { log_msg r "Ошибка установки PHP"; return 1; }
 
     local ini="/etc/php/${PHP_VER}/fpm/php.ini"
     if [ -f "$ini" ]; then
@@ -781,10 +783,14 @@ install_webserver() {
     [[ "$target" == "apache" ]] && $HAS_APACHE && { log_msg y "Apache уже установлен"; return 0; }
 
     # PHP уже стоит (например, остался после предыдущего веб-сервера) —
-    # версию не трогаем и репозитории не подключаем, используем как есть.
-    # Иначе — спрашиваем версию один раз, до какой-либо установки.
+    # версию не трогаем, используем как есть. Иначе ставим ту версию,
+    # что штатно идёт с этим релизом ОС — без лишних вопросов.
     if ! $HAS_PHP; then
-        select_php_version || return 1
+        PHP_VER=$(php_recommended_version)
+        if [ -z "$PHP_VER" ]; then
+            log_msg r "Не удалось определить версию PHP для установки"
+            return 1
+        fi
     fi
 
     if [[ "$target" == "angie" ]]; then
@@ -873,7 +879,7 @@ menu() {
         echo ""
 
         if ! $HAS_APACHE && ! $HAS_ANGIE; then
-            local php_hint="${PHP_VER:-версия PHP выбирается при установке}"
+            local php_hint="${PHP_VER:-$(php_recommended_version)}"
             echo "  1) Установить Angie  + PHP ($php_hint)"
             echo "  2) Установить Apache + PHP ($php_hint)"
             echo "  3) Установить MariaDB"
