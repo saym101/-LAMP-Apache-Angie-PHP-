@@ -4,7 +4,9 @@
 # Лицензия: MIT
 
 readonly SCRIPT_VERSION="4.1.0"
-readonly PHP_VER="8.3"
+# Версия PHP не зашита жёстко: определяется по уже установленному пакету
+# (detect_state) или выбирается админом при первой установке (select_php_version).
+PHP_VER=""
 readonly SITE_ROOT="/var/www/html"
 readonly BACKUP_DIR="/backups/web-lamp"
 readonly STATE_DIR="/var/lib/lamp-setup"
@@ -55,6 +57,78 @@ apt_pkg_available() {
     apt-cache show "$1" 2>/dev/null | grep -q '^Package:'
 }
 
+# Версии PHP, которые уже есть в подключённых репозиториях (штатных для этой
+# ОС) — без учёта Sury/PPA. Требует свежего apt-get update (см. setup_base).
+php_native_versions() {
+    apt-cache pkgnames php 2>/dev/null \
+        | grep -E '^php[0-9]+\.[0-9]+-fpm$' \
+        | sed -E 's/^php([0-9]+\.[0-9]+)-fpm$/\1/' \
+        | sort -Vu
+}
+
+# Версия, которую сама ОС считает "текущей" (метапакет php-fpm/php тянет
+# именно её) — это и есть та версия, под которую разработчики настраивали
+# конкретный релиз дистрибутива. Фоллбек — просто самая свежая штатная.
+php_recommended_version() {
+    local v
+    v=$(apt-cache show php-fpm 2>/dev/null | awk -F'[ ,]+' '
+        /^Depends:/ {
+            for (i = 1; i <= NF; i++) {
+                if ($i ~ /^php[0-9]+\.[0-9]+-fpm$/) {
+                    gsub(/^php|-fpm$/, "", $i)
+                    print $i
+                    exit
+                }
+            }
+        }')
+    if [ -n "$v" ]; then
+        echo "$v"
+        return
+    fi
+    php_native_versions | tail -1
+}
+
+# Интерактивный выбор версии PHP для установки. По умолчанию отмечена та
+# версия, что уже есть в штатных репозиториях этой ОС/релиза — её и стоит
+# ставить в большинстве случаев. Любая другая версия потребует подключения
+# стороннего репозитория (Sury на Debian, ppa:ondrej/php на Ubuntu) — это
+# происходит только если админ осознанно выбрал версию, которой нет в штатных
+# репах, а не всегда "на всякий случай".
+select_php_version() {
+    local default_ver native_vers=() v status choice custom_ver args=()
+    default_ver=$(php_recommended_version)
+    mapfile -t native_vers < <(php_native_versions)
+
+    if command -v whiptail &>/dev/null; then
+        for v in "${native_vers[@]}"; do
+            status="OFF"
+            [ "$v" = "$default_ver" ] && status="ON"
+            args+=("$v" "в штатных репозиториях этой ОС" "$status")
+        done
+        args+=("custom" "другая версия (потребуется стороннее apt-репо)" "OFF")
+        choice=$(whiptail --title "Выбор версии PHP" --radiolist \
+            $'Версия по умолчанию отмечена — под неё настроен текущий релиз ОС.\nВыберите версию (пробел — отметить, Enter — подтвердить):' \
+            18 74 8 "${args[@]}" 3>&1 1>&2 2>&3)
+        [ -z "$choice" ] && { log_msg y "Выбор версии PHP отменён"; return 1; }
+    else
+        log_msg c "Версии PHP в штатных репозиториях: ${native_vers[*]:-нет}"
+        read -r -e -i "$default_ver" -p "Версия PHP для установки (Enter — по умолчанию): " choice
+        [ -z "$choice" ] && choice="$default_ver"
+    fi
+
+    if [ "$choice" = "custom" ]; then
+        read -r -p "Введите версию PHP (например 8.4 или 7.4): " custom_ver
+        [ -z "$custom_ver" ] && { log_msg r "Версия не введена"; return 1; }
+        choice="$custom_ver"
+    fi
+
+    if ! [[ "$choice" =~ ^[0-9]+\.[0-9]+$ ]]; then
+        log_msg r "Некорректный формат версии: $choice"
+        return 1
+    fi
+    PHP_VER="$choice"
+}
+
 get_public_ip() {
     curl -s --max-time 5 https://api.ipify.org 2>/dev/null \
         || curl -s --max-time 5 https://ifconfig.me 2>/dev/null \
@@ -67,10 +141,20 @@ get_public_ip() {
 
 detect_state() {
     HAS_APACHE=false; HAS_ANGIE=false; HAS_PHP=false; HAS_MARIADB=false
-    pkg_installed apache2             && HAS_APACHE=true
-    pkg_installed angie               && HAS_ANGIE=true
-    pkg_installed "php${PHP_VER}-fpm" && HAS_PHP=true
-    pkg_installed mariadb-server      && HAS_MARIADB=true
+    pkg_installed apache2         && HAS_APACHE=true
+    pkg_installed angie           && HAS_ANGIE=true
+    pkg_installed mariadb-server  && HAS_MARIADB=true
+
+    local installed_ver
+    installed_ver=$(dpkg-query -W -f='${Package} ${Status}\n' 'php*-fpm' 2>/dev/null \
+        | awk '$0 ~ /install ok installed$/ {print $1}' \
+        | grep -E '^php[0-9]+\.[0-9]+-fpm$' \
+        | sed -E 's/^php([0-9]+\.[0-9]+)-fpm$/\1/' \
+        | sort -V | tail -1)
+    if [ -n "$installed_ver" ]; then
+        PHP_VER="$installed_ver"
+        HAS_PHP=true
+    fi
 }
 
 # ============================================================
@@ -80,7 +164,7 @@ detect_state() {
 setup_base() {
     log_msg g "=== Проверка зависимостей ==="
     apt-get update -qq >/dev/null 2>&1
-    for pkg in curl mc wget gnupg ca-certificates; do
+    for pkg in curl mc wget gnupg ca-certificates whiptail; do
         ensure_package "$pkg" || return 1
     done
     mkdir -p "$STATE_DIR" "$BACKUP_DIR"
@@ -89,7 +173,7 @@ setup_base() {
 }
 
 # ============================================================
-# PHP 8.3
+# PHP
 # ============================================================
 
 setup_php() {
@@ -696,6 +780,13 @@ install_webserver() {
     [[ "$target" == "angie"  ]] && $HAS_ANGIE  && { log_msg y "Angie уже установлен";  return 0; }
     [[ "$target" == "apache" ]] && $HAS_APACHE && { log_msg y "Apache уже установлен"; return 0; }
 
+    # PHP уже стоит (например, остался после предыдущего веб-сервера) —
+    # версию не трогаем и репозитории не подключаем, используем как есть.
+    # Иначе — спрашиваем версию один раз, до какой-либо установки.
+    if ! $HAS_PHP; then
+        select_php_version || return 1
+    fi
+
     if [[ "$target" == "angie" ]]; then
         setup_angie              || return 1
         setup_php                || return 1
@@ -782,8 +873,9 @@ menu() {
         echo ""
 
         if ! $HAS_APACHE && ! $HAS_ANGIE; then
-            echo "  1) Установить Angie  + PHP ${PHP_VER}"
-            echo "  2) Установить Apache + PHP ${PHP_VER}"
+            local php_hint="${PHP_VER:-версия PHP выбирается при установке}"
+            echo "  1) Установить Angie  + PHP ($php_hint)"
+            echo "  2) Установить Apache + PHP ($php_hint)"
             echo "  3) Установить MariaDB"
             echo "  0) Выход"
             echo ""
