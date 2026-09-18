@@ -1,9 +1,9 @@
 #!/bin/bash
-# lamp.sh v4.0.0 — Установка LAMP/LEMP на Debian 12
+# lamp.sh v4.1.0 — Установка LAMP/LEMP на Debian 12/13 и Ubuntu 22.04+
 # Репозиторий: https://github.com/saym101/-LAMP-Apache-Angie-PHP-/
 # Лицензия: MIT
 
-readonly SCRIPT_VERSION="4.0.0"
+readonly SCRIPT_VERSION="4.1.0"
 readonly PHP_VER="8.3"
 readonly SITE_ROOT="/var/www/html"
 readonly BACKUP_DIR="/backups/web-lamp"
@@ -51,6 +51,10 @@ ensure_package() {
     apt-get install -y "$pkg" >/dev/null 2>&1 || { log_msg r "Не удалось установить $pkg"; return 1; }
 }
 
+apt_pkg_available() {
+    apt-cache show "$1" 2>/dev/null | grep -q '^Package:'
+}
+
 get_public_ip() {
     curl -s --max-time 5 https://api.ipify.org 2>/dev/null \
         || curl -s --max-time 5 https://ifconfig.me 2>/dev/null \
@@ -76,7 +80,7 @@ detect_state() {
 setup_base() {
     log_msg g "=== Проверка зависимостей ==="
     apt-get update -qq >/dev/null 2>&1
-    for pkg in curl mc wget gnupg ca-certificates lsb-release whiptail; do
+    for pkg in curl mc wget gnupg ca-certificates; do
         ensure_package "$pkg" || return 1
     done
     mkdir -p "$STATE_DIR" "$BACKUP_DIR"
@@ -94,14 +98,43 @@ setup_php() {
     fi
     log_msg g "=== Установка PHP ${PHP_VER} ==="
 
-    if [ ! -f /etc/apt/sources.list.d/php.list ]; then
-        mkdir -p /usr/share/keyrings
-        curl -sSLo /usr/share/keyrings/deb.sury.org-php.gpg \
-            https://packages.sury.org/php/apt.gpg 2>/dev/null \
-            || { log_msg r "Ошибка загрузки ключа Sury"; return 1; }
-        echo "deb [signed-by=/usr/share/keyrings/deb.sury.org-php.gpg] https://packages.sury.org/php/ bookworm main" \
-            > /etc/apt/sources.list.d/php.list
-        apt-get update -qq >/dev/null 2>&1
+    if apt_pkg_available "php${PHP_VER}-fpm"; then
+        log_msg c "PHP ${PHP_VER} уже есть в штатных репозиториях — сторонний репозиторий не нужен"
+    else
+        # shellcheck disable=SC1091
+        . /etc/os-release
+        case "$ID" in
+            debian)
+                mkdir -p /usr/share/keyrings
+                curl -sSLo /usr/share/keyrings/deb.sury.org-php.gpg \
+                    https://packages.sury.org/php/apt.gpg 2>/dev/null \
+                    || { log_msg r "Ошибка загрузки ключа Sury"; return 1; }
+                echo "deb [signed-by=/usr/share/keyrings/deb.sury.org-php.gpg] https://packages.sury.org/php/ ${VERSION_CODENAME} main" \
+                    > /etc/apt/sources.list.d/php.list
+                apt-get update -qq >/dev/null 2>&1
+                if ! apt_pkg_available "php${PHP_VER}-fpm"; then
+                    log_msg r "PHP ${PHP_VER} недоступен в packages.sury.org для Debian ${VERSION_CODENAME}"
+                    rm -f /etc/apt/sources.list.d/php.list
+                    return 1
+                fi
+                ;;
+            ubuntu)
+                ensure_package software-properties-common || return 1
+                if ! add-apt-repository -y ppa:ondrej/php >/dev/null 2>&1; then
+                    log_msg r "Не удалось подключить ppa:ondrej/php для Ubuntu ${VERSION_CODENAME}"
+                    return 1
+                fi
+                apt-get update -qq >/dev/null 2>&1
+                if ! apt_pkg_available "php${PHP_VER}-fpm"; then
+                    log_msg r "PHP ${PHP_VER} недоступен в ppa:ondrej/php для Ubuntu ${VERSION_CODENAME}"
+                    return 1
+                fi
+                ;;
+            *)
+                log_msg r "Неизвестная ОС ($ID) — автоподбор репозитория PHP не поддерживается"
+                return 1
+                ;;
+        esac
     fi
 
     # Модули под WordPress / DLE + imagick
@@ -154,6 +187,12 @@ setup_angie() {
 https://download.angie.software/angie/${ID}/${VERSION_ID} ${VERSION_CODENAME} main" \
         > /etc/apt/sources.list.d/angie.list
     apt-get update -qq >/dev/null 2>&1
+    if ! apt_pkg_available angie; then
+        log_msg r "Репозиторий Angie недоступен для ${ID} ${VERSION_ID} (${VERSION_CODENAME}) — судя по всему, апстрим ещё не собирает пакеты под эту версию ОС"
+        rm -f /etc/apt/sources.list.d/angie.list /usr/share/keyrings/angie-archive-keyring.gpg
+        apt-get update -qq >/dev/null 2>&1
+        return 1
+    fi
     apt-get install -y angie >/dev/null 2>&1 || { log_msg r "Ошибка установки Angie"; return 1; }
     systemctl enable angie >/dev/null 2>&1
     log_msg g "Angie установлен"

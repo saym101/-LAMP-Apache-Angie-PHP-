@@ -1,6 +1,6 @@
 # LAMP/LEMP Installer
 
-![Version](https://img.shields.io/badge/version-4.0.1-blue)
+![Version](https://img.shields.io/badge/version-4.1.0-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 ![Platform](https://img.shields.io/badge/platform-Debian%2FUbuntu-orange)
 
@@ -15,12 +15,15 @@
 
 ## Поддержка
 
-Скрипт рассчитан на Debian и Ubuntu с `systemd`, `apt` и root-доступом.
+Проверенные версии: Debian 12 (Bookworm) / 13 (Trixie), Ubuntu 22.04 / 24.04 LTS, 25.04, 25.10, 26.04 LTS. Другие версии не тестируются.
 
 Для PHP 8.3 используется:
 
-- Debian: репозиторий `packages.sury.org`;
-- Ubuntu: штатные репозитории, если пакет доступен, иначе `ppa:ondrej/php`.
+- сначала проверяются штатные репозитории ОС — если пакет уже там (например, Ubuntu 24.04), сторонний репозиторий не подключается вовсе;
+- иначе на Debian — `packages.sury.org` под реальный коднейм системы (`$VERSION_CODENAME` из `/etc/os-release`);
+- иначе на Ubuntu — `ppa:ondrej/php`.
+
+Angie подключается из `download.angie.software` под реальные `$ID/$VERSION_ID/$VERSION_CODENAME`. Апстрим не всегда успевает собрать пакеты под самые свежие промежуточные релизы Ubuntu (25.04/25.10) — в этом случае скрипт откатывает добавленный репозиторий и завершится понятной ошибкой; используйте Apache как альтернативу.
 
 Для IP-сертификатов Let's Encrypt нужен Certbot 5.3+ с поддержкой `--ip-address` и `--preferred-profile shortlived`. Если системный пакет Certbot старее, пункт IP-сертификата завершится понятной ошибкой и попросит обновить Certbot.
 
